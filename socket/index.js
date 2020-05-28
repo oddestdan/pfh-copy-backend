@@ -15,6 +15,10 @@ const {
 } = require('./utilits');
 const {errors, successes} = require('./constants');
 
+const users = {}; // TODO: use Mongo
+const socketToRoom = {}; // TODO: use Mongo
+const MAX_PEERS_PER_CALL = 6; // TODO: store in constants
+
 module.exports = function (socketIO) {
     socketIO.on('connection', function (socket) {
             logger.info('Connected...');
@@ -111,30 +115,60 @@ module.exports = function (socketIO) {
                 return errorHandler(socket, errors.CONNECTION_FAILED)
             });
 
-            socket.on('request-new-peer', ({ room }) => {
-                logger.info('Received new peer request');
-                socket.to(room).broadcast.emit('create-peer', {
-                    answer: successes.NEW_PEER_REQUEST,
-                    payload: {},
-                });
-            })
+        // WebRTC video-chat (mesh network, max 6 peers per call)
+        
+        socket.on("join room", ({roomCode}) => {
+            logger.info(`>>> Someone joining room ${roomCode}`);
 
-            socket.on('media-offer', ({offer, room}) => {
-                logger.info('Received media offer');
-                socket.to(room).broadcast.emit('media-back-offer', {
-                    answer: successes.MEDIA_OFFER,
-                    payload: offer,
-                });
-            });
+            if (users[roomCode]) {
+                const length = users[roomCode].length;
+                if (length >= MAX_PEERS_PER_CALL) {
+                    socket.emit("room full");
+                    return;
+                }
+                users[roomCode].push(socket.id);
+            } else {
+                users[roomCode] = [socket.id];
+            }
+            socketToRoom[socket.id] = roomCode;
+            const usersInThisRoom = users[roomCode].filter(id => id !== socket.id);
 
-            socket.on('media-answer', ({answer, room}) => {
-                logger.info('Received media answer');
-                socket.to(room).broadcast.emit('media-back-answer', {
-                    answer: successes.MEDIA_ANSWER,
-                    payload: answer,
-                });
+            logger.info(usersInThisRoom);
+
+            socket.emit("all users", usersInThisRoom);
+        });
+
+        socket.on("sending signal", ({userToSignal, signal, callerID}) => {
+            logger.info(`>>> Someone sending signal | userToSignal | CallerID`);
+            logger.info(userToSignal, '|', callerID);
+
+            socketIO.to(userToSignal).emit('user joined', {
+                signal, callerID
             });
-        }
-    )
+        });
+    
+        socket.on("returning signal", ({callerID, signal}) => {
+            const { id } = socket;
+
+            logger.info(`>>> Someone returning signal | CallerID | socketID`);
+            logger.info(callerID, '|', id);
+
+            socketIO.to(callerID).emit('receiving returned signal', {
+                signal, id
+            });
+        });
+    
+        socket.on('disconnect', () => {
+            logger.info(`>>> Someone disconnecting`);
+
+            const roomCode = socketToRoom[socket.id];
+            let room = users[roomCode];
+            logger.info(room);
+            if (room) {
+                room = room.filter(id => id !== socket.id);
+                users[roomCode] = room;
+            }
+        });
+    });
 };
 
